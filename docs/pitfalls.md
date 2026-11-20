@@ -87,6 +87,10 @@ names (`git merge-base --is-ancestor <fix> <release tag>`), and check the messag
 
 ## Tests
 
+**Invalid-byte filename fixtures gated only on Unix.** `cfg(unix)` includes Apple targets,
+where APFS rejects the fixture names before their assertions run. Keep filesystem tests that
+require invalid UTF-8 names off Apple targets, while retaining iterator-only coverage on Unix.
+
 **A TLS fixture closed before the handshake.** Accepted sockets inherited the listener's
 nonblocking mode on Windows, so the fixture read `WouldBlock` and closed a valid connection.
 Set the accepted socket to blocking mode before applying bounded I/O timeouts; consume the
@@ -234,6 +238,13 @@ you couldn't.
 off the UI thread; a UI test that added pictures, ran three frames and then looked kept passing on
 fast machines and failed in CI on unrelated PRs. When work moves to a worker, grep the tests that
 call it and make them `wait` for the result, not `run_steps(n)`.
+
+**An interrupted call read as "nothing answered".** A Cutter test failed once on Linux CI with "No
+Cutter session answered … Interrupted system call": a signal reached the thread (likely another
+test's child ending) during a loopback call, and every error that wasn't a timeout meant "no
+session". An interrupted system call is not an answer: decide on the error's typed kind
+(`ErrorKind::Interrupted`), call again within the same time limit when the request is safe to
+repeat (`platform::retry::when_interrupted`), and otherwise say it was interrupted.
 
 **A stand-in server that answers every request in order.** The AI tests' `mock` answered each
 request with the next scripted reply, so when the agent began asking the server for its context
@@ -558,6 +569,11 @@ keep the decision in a function a test can call (`plan` in `crates/ui-egui/build
 **Unformatted code reached `main`.** A test was edited by script after `cargo fmt --all` had run,
 so #53 merged with a long line rustfmt rewraps. Run `cargo fmt --all --check` last, after every
 edit, right before committing.
+Then `cargo fmt --all` itself stopped working on Windows: it hands rustfmt every target's root file
+in one command, and with the tests added since then that was about 31,000 characters of `\\?\`
+paths, past the 32,767 limit ("The filename or extension is too long", os error 206), so `cargo
+xtask ci` failed before checking anything. A command that takes one argument per file grows with
+the repository: format through `cargo xtask fmt [--check]`, which sends the same files in batches.
 
 **Clippy passed on an older Rust.** #1480 ran clippy on Rust 1.97 (the workspace's
 `rust-version`), clean; CI's 1.99 has `clippy::chunks_exact_to_as_chunks` and stopped the PR on
@@ -893,6 +909,10 @@ result ignored. Only "not found" means there's nothing to lose. Defaults that st
 that is there carry that fact (`Settings::not_loaded`) and refuse to be saved, also through a
 serde round trip that would drop it (`with_setting`); a backup keeps every byte under a name
 nothing else has, and one that fails stops the save.
+And "not found" wasn't that either: reading a link whose target is missing answers "not found"
+too, so such a config.toml was a first start and the next save put a file where the link was. A
+read's error describes the end of the path it followed, not the path: before treating "not
+found" as "nothing to lose", look at the path itself without following it (`symlink_metadata`).
 
 **A save that changed memory first.** Adding an AI in the app put it in the session's settings,
 then the file write failed (on Windows, likely a virus scan holding config.toml), so the app showed
@@ -904,15 +924,42 @@ on Windows (`write_atomic`); show errors where the person is looking.
 `max_files` but went on through the whole tree, read each folder's entries into one list before
 looking at any limit, and kept every folder and link it met: a tree of empty folders or links, or
 one folder with millions of names, had no limit at all. Count what is examined, not only what is
-kept; stop at the first thing over a limit; bound what is held while collecting (the first names in
-order, so a cut result is the same every time); and test the shapes that never reach the limit on
-the thing counted (no files, only links, one huge folder).
+kept; stop at the first thing over a limit; bound what is held while collecting; and test the
+shapes that never reach the limit on the thing counted (no files, only links, one huge folder).
+The order matters as much as the count: the walk listed a folder's files before opening any of its
+subfolders, so a file limit cut the tree in that order, and a later sort by path couldn't bring back
+the file inside an earlier folder that was dropped for later ones. When a result is shown in an
+order and cut by a limit, produce it in that order; don't sort what a different order kept.
+The fix repeated it one level down: to keep a folder's first names in order it held only as many
+names as the limit, but read the folder to its end to find them, 100,000 entries for a limit of 2,
+and its test checked what was held, not what was read. A limit on the work is a count of reads:
+take what the limit allows and one more (which says there is more), and assert how many times the
+source was read with a counting iterator. That costs the stable order: a cut listing holds what
+the system returned first, and the docs must say so rather than promise the same cut every time.
+The same loop skipped entries that failed to read and returned what was left as the whole folder;
+64 failures in a row came back as an empty folder listed in full, and a test expected exactly
+that. Anything skipped while reading is reported with the result (a count, a reason, a typed
+"incomplete" flag), and a test of an error path asserts what the caller is told, not only that
+the loop ended.
+
+**A result with two "what was missed" fields, read as one.** A folder walk says a listing is
+incomplete in `truncated` and names the folders it couldn't list in `unlisted`; five tools read
+only the flag, so an unreadable folder was "a limit" with no name and no reason, and a folder that
+couldn't be listed at all set `unlisted` without the flag. When a result carries what was missed
+in more than one field, check every caller reads all of them, and test each caller with the real
+failure (a folder held without sharing, or without permission), not only the walk.
 
 **An ignore file was read whole.** `walk_dir` read each `.gitignore` with `read_to_string` and
 swallowed every error: a sparse oversized file could size the allocation until the process aborted,
 a FIFO at that path could block the walk, and an unreadable or non-UTF-8 file lost its rules with no
 limitation. Read it through the capped, regular-file-checked helper, keep the cap well above real
 ignore files, and name every skipped file in the evidence; an absent file is the only silent case.
+
+**An inventory's size used as a read limit.** The managed reconstruction check compared a file's
+inventoried size with its 64 MiB budget, then read the file whole; growth in between bypassed the
+budget. Use the capped regular-file reader with the remaining budget, which checks bytes read
+as well as metadata. Test growth after a real inventory, the aggregate limit and exact-limit
+inputs. When nothing can be read, keep the read failures and the walk cut in the error too.
 
 **A graph cap was silent for edges and complete in coverage.** The application graph dropped
 edges past `4 × max_nodes` with no counter, and `js_app_map` reported Complete even when nodes or
@@ -980,6 +1027,11 @@ same PR as the change.
 for it locally, and CI's `cargo xtask i18n-coverage` failed: the app shows tool titles, so each
 needs a translation in every catalog. Run `cargo xtask i18n-coverage` for any PR that adds a tool
 or changes a title, not only for UI changes.
+
+**An inserted name became another placeholder.** Filling `{saved}` and then `{used}` with repeated
+replacements rewrites a saved builder named `{used}`. Fill every placeholder in one pass over the
+template (`platform::text::fill`, which `i18n::trf` uses), never by chained `replace` calls, so
+inserted names stay literal; test placeholder-looking names as well as ordinary ones.
 
 **A second lock in one statement.** `CliSpec { deep: !engine.session().clean_room(), logs: engine.session().config_dir(), … }`
 looked like two quick reads, but an unbound guard lives to the end of the statement, so the second

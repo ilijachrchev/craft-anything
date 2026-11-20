@@ -109,9 +109,14 @@ fn first_run_continue_is_reachable_at_the_smallest_window() {
 fn simple_title_bar_keeps_only_the_essentials() {
     let mut h = harness(|| demo::app(demo::engine(Mode::Beginner, true)));
     h.run_steps(3);
-    assert!(h.query_by_label("Advanced").is_none(), "the mode switch lives in Settings in Simple mode");
+    // The title bar has no mode switch in Simple mode: the only one is on Make, beside the ways in.
+    let door = h.get_by_label("Make my own version").rect().center().y;
+    for n in h.query_all_by_label("Advanced") {
+        assert!((n.rect().center().y - door).abs() < 4.0, "the mode switch lives in Settings and on Make in Simple mode");
+    }
     h.get_by_label("Settings");
-    h.get_by_label("Clean room");
+    // The title bar's Clean room switch stays (Make's tiles have one too, further down).
+    assert!(h.query_all_by_label("Clean room").any(|n| n.rect().bottom() < door), "the Clean room switch is in the title bar");
 }
 
 #[test]
@@ -953,8 +958,176 @@ fn website_choice_stays_picked_while_the_address_is_empty() {
     h.get_by_label("Nothing — start fresh").click();
     h.run_steps(3);
     assert!(!h.state().state.make.editing_url);
-    assert!(h.query_by_label("How closely may Craft Anything look at it?").is_none(), "nothing to look at");
+    // Nothing to look at: the choice stays in view, dimmed, and says when it applies.
+    h.get_by_label("How closely may Craft Anything look at it?");
+    h.get_by_label("This applies once you choose something to recreate above.");
+    let deep = h.state().settings.deep_mode;
+    h.get_by_label("Deep").click();
+    h.run_steps(2);
+    assert_eq!(h.state().settings.deep_mode, deep, "a dimmed tile changes nothing");
     assert!(h.query_by_label("Type the website's address:").is_none());
+}
+
+/// A website typed on Make can be signed in to from there (`web_site_sign_in`), one sign-in at a
+/// time, and Start waits until it's over.
+#[test]
+fn a_website_is_signed_in_to_from_make() {
+    let store = tempfile::tempdir().unwrap();
+    let store_dir = store.path().to_path_buf();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        // No browser here: only the path set (not there) and an empty engine store are looked at,
+        // so the sign-in fails at once, as on a computer without one, and no window opens. The
+        // app hands its settings to the session, so both get them.
+        let engines = &mut a.settings.engines;
+        engines.only_configured = true;
+        engines.store_dir = Some(store_dir);
+        engines.tools.chromium = Some("/nowhere/chromium".into());
+        a.engine.session().settings.engines = a.settings.engines.clone();
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("A website").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none(), "no address yet");
+    h.state_mut().state.make.url = "two words.com".into();
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none(), "not an address a sign-in can be saved for");
+    h.state_mut().state.make.url = "example.com".into();
+    h.state_mut().state.make.request = "Recreate this website".into();
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site").click();
+    h.run_steps(1);
+    assert!(h.state().signing_in.is_some(), "the sign-in started");
+    assert!(wait(&mut h, |a| a.signing_in.is_none()), "and ended");
+    assert!(
+        h.state().state.toasts.iter().any(|(t, err)| *err && t.starts_with("example.com: Couldn't sign in to the site.") && t.contains("chromium")),
+        "{:?}",
+        h.state().state.toasts
+    );
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site");
+
+    // Not while a new project is being made: its build would study the site before the sign-in ends.
+    h.state_mut().creating = Some(u64::MAX);
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site").click();
+    h.run_steps(1);
+    assert!(h.state().signing_in.is_none(), "no sign-in while a project is made");
+    h.state_mut().sign_in_to_site("https://example.com");
+    assert!(h.state().signing_in.is_none(), "nor from elsewhere");
+    h.state_mut().creating = None;
+
+    // While a sign-in window is open: no second one, a way to stop waiting, and Start waits.
+    h.state_mut().signing_in = Some(u64::MAX);
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none());
+    h.get_by_label("Stop waiting");
+    h.get_by_label("Start").click();
+    h.run_steps(2);
+    assert!(h.state().creating.is_none(), "nothing starts before the sign-in is over");
+    assert_eq!(h.state().state.screen, Screen::Home);
+    // Nor from the other ways a start is reached (a builder picked, an engine got).
+    h.state_mut().start_make();
+    h.run_steps(1);
+    assert!(h.state().creating.is_none());
+    assert!(h.state().state.toasts.iter().any(|(t, _)| t == "Finish signing in to the site first."), "{:?}", h.state().state.toasts);
+    // The way out stays while the address changes or another kind of original is picked.
+    h.state_mut().state.make.url.clear();
+    h.run_steps(2);
+    h.get_by_label("Stop waiting");
+    h.get_by_label("Nothing — start fresh").click();
+    h.run_steps(2);
+    h.get_by_label("Stop waiting");
+    assert!(h.query_by_label("Sign in to this site").is_none());
+}
+
+/// Make's Simple / Advanced switch changes the app's mode and keeps the screen and the draft (#1286).
+#[test]
+fn the_make_card_switches_simple_and_advanced_and_keeps_the_draft() {
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.state.make.request = "a calculator".into();
+        a
+    });
+    h.run_steps(3);
+    // Simple mode's title bar has no mode switch: Make offers it beside the ways in.
+    h.get_by_label("Mode");
+    h.get_by_label("Advanced").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings.mode, Mode::Experienced);
+    assert_eq!(h.state().state.make.request, "a calculator", "the draft stays");
+    assert_eq!(h.state().state.screen, Screen::Home, "Make stays in view instead of the workbench");
+    h.get_by_label("What do you want to recreate?");
+    // Back from the card's own switch: the title bar now has one too, higher up.
+    h.query_all_by_label("Simple").max_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings.mode, Mode::Beginner);
+    assert_eq!(h.state().state.make.request, "a calculator");
+}
+
+/// At the app's smallest window the Simple / Advanced switch moves under the ways in, inside the
+/// window (#1286).
+#[test]
+fn the_make_mode_switch_stays_inside_the_narrowest_window() {
+    // The app's smallest window (main.rs): the switch moves under the ways in instead of off the edge.
+    let mut h = harness_sized(egui::vec2(760.0, 520.0), || demo::app(demo::engine(Mode::Beginner, true)));
+    h.run_steps(3);
+    let door = h.get_by_label("Just look inside").rect();
+    let advanced = h.get_by_label("Advanced").rect();
+    assert!(advanced.right() <= 760.0, "the switch ends at {} in a 760-point window", advanced.right());
+    assert!(advanced.top() >= door.bottom(), "on its own line below the ways in");
+
+    // Review of #1286: the room the switch needs is measured (so a longer translation moves it
+    // down sooner), not a fixed width. At every width it's beside the ways in or below them,
+    // never over them, and inside the window.
+    for width in [1600.0, 1280.0, 1100.0, 1000.0, 900.0] {
+        let mut h = harness_sized(egui::vec2(width, 820.0), || demo::app(demo::engine(Mode::Beginner, true)));
+        h.run_steps(3);
+        let door = h.get_by_label("Just look inside").rect();
+        let (simple, advanced) = (h.get_by_label("Simple").rect(), h.get_by_label("Advanced").rect());
+        let mode = h.get_by_label("Mode").rect();
+        for part in [simple, advanced, mode] {
+            assert!(!part.intersects(door), "at {width}: {part:?} overlaps the ways in at {door:?}");
+            assert!(part.left() >= 0.0 && part.right() <= width, "at {width}: {part:?} leaves the window");
+        }
+    }
+}
+
+/// Switching modes changes what is shown, not how big it is: both use the type scale's sizes.
+#[test]
+fn simple_and_advanced_use_the_same_text_sizes() {
+    let mut h = harness(|| demo::app(demo::engine(Mode::Beginner, true)));
+    h.run_steps(3);
+    // Every text style (Body, Small, Button, Heading, Monospace) and all of egui's spacing:
+    // padding, gaps, control sizes and margins.
+    let sizes = |h: &Harness<'static, CraftApp>| {
+        let style = h.ctx.global_style();
+        (style.text_styles.clone(), style.spacing.clone())
+    };
+    let simple = sizes(&h);
+    let body = simple.0.get(&egui::TextStyle::Body).map(|f| f.size);
+    assert_eq!(body, Some(craft_anything_ui_egui::theme::BODY), "body text is the scale's BODY");
+    assert_eq!(simple.0.len(), 5, "the five text styles are all set: {:?}", simple.0.keys());
+    h.state_mut().set_mode(Mode::Experienced);
+    h.run_steps(3);
+    assert_eq!(sizes(&h), simple, "Advanced draws text and controls at the same sizes");
+    // Review of #1236: back again after the theme and the zoom changed in Advanced. The theme is
+    // applied again, the zoom stays the person's, and the sizes still match.
+    h.state_mut().settings.theme = "studio-light".into();
+    h.ctx.set_zoom_factor(1.5);
+    h.run_steps(3);
+    assert_eq!(sizes(&h), simple, "another theme keeps the sizes");
+    h.state_mut().set_mode(Mode::Beginner);
+    h.run_steps(3);
+    assert_eq!(sizes(&h), simple, "Simple again, after a theme and zoom change, draws at the same sizes");
+    assert_eq!(h.ctx.zoom_factor(), 1.5, "switching modes leaves the zoom as it was");
+    h.ctx.set_zoom_factor(1.0);
+    h.run_steps(2);
+    // Larger text is zoom's job now, and the Mode row says how.
+    h.state_mut().state.settings_open = true;
+    h.run_steps(3);
+    h.get_by_label("Text bigger or smaller: Ctrl/⌘ + and Ctrl/⌘ −. Ctrl/⌘ 0 resets it.");
 }
 
 #[test]
@@ -967,7 +1140,8 @@ fn mode_switch_and_deep_toggle() {
         a
     });
     h.run_steps(3);
-    // Simple mode: the switch is in Settings.
+    // Simple mode: the switch is in Settings (and on Make, so look from another screen).
+    h.state_mut().state.screen = Screen::Ask;
     h.state_mut().state.settings_open = true;
     h.run_steps(3);
     h.get_by_label("Advanced").click();
@@ -1505,6 +1679,55 @@ fn an_ai_server_is_added_by_its_address() {
     assert!(h.state().server_form.name.is_empty(), "the form empties once it's added");
 }
 
+/// #1434, review of #1436: a server's chat models are chosen from its dropdown, and a model picked
+/// there goes once the address is changed, so Add can't ask another server for it. A model typed
+/// by hand stays.
+#[test]
+fn a_model_picked_from_a_servers_list_is_chosen_there_and_goes_with_its_address() {
+    const A: &str = "http://127.0.0.1:0/v1";
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Experienced, true));
+        a.state.settings_open = true;
+        a.state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+        a.server_form = craft_anything_ui_egui::ServerForm {
+            name: "Npu".into(),
+            address: A.into(),
+            choices: Some((A.into(), vec!["deepseek-r1:8b".into(), "qwen3:8b".into()])),
+            ..Default::default()
+        };
+        a
+    });
+    h.run_steps(2);
+    // The form sits below the fold of the AI page: scroll to it, as a person would.
+    h.event(egui::Event::PointerMoved(egui::pos2(640.0, 400.0)));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -300.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(20);
+    h.get_by_label("Choose a model").click();
+    h.run_steps(3);
+    h.get_by_label("qwen3:8b").click();
+    h.run_steps(3);
+    assert_eq!(h.state().server_form.model, "qwen3:8b", "the dropdown fills the model field");
+    // The address is edited: the picked model was that server's, so it goes.
+    h.get_by_label("Server address").focus();
+    h.run_steps(1);
+    h.get_by_label("Server address").type_text("x");
+    h.run_steps(3);
+    assert_eq!(h.state().server_form.address, format!("{A}x"));
+    assert_eq!(h.state().server_form.model, "", "a model picked for another address goes");
+    assert!(h.query_by_label("Choose a model").is_none(), "nor is that address's list offered");
+    // A model typed by hand isn't touched by an address change.
+    h.state_mut().server_form.model = "my-own-model".into();
+    h.run_steps(1);
+    h.get_by_label("Server address").type_text("y");
+    h.run_steps(3);
+    assert_eq!(h.state().server_form.model, "my-own-model", "a typed model stays");
+}
+
 /// #53: an agent app installed where it isn't looked for gets its program chosen in Settings → AI,
 /// and goes back to being found by its usual name.
 #[test]
@@ -1844,6 +2067,35 @@ fn title_bar_keeps_its_size_when_zoomed() {
     }
 }
 
+/// Review of #1234: with System chosen, what's drawn follows the system's appearance frame by
+/// frame (`CraftApp::tick` reads it from each frame's input), back and forth; a chosen theme
+/// stays as it is whatever the system says.
+#[test]
+fn the_system_theme_follows_the_systems_appearance_as_it_changes() {
+    use craft_anything_ui_egui::theme::ThemeKind;
+    use egui::Theme::{Dark, Light};
+    let mut h = harness(|| demo::app(demo::engine(Mode::Beginner, true)));
+    h.run_steps(2);
+    assert_eq!(h.state().settings.theme, "system", "System is the default");
+    let drawn_dark = |h: &Harness<'static, CraftApp>| h.ctx.global_style().visuals.dark_mode;
+    for (system, kind) in [(Light, ThemeKind::StudioLight), (Dark, ThemeKind::Studio), (Light, ThemeKind::StudioLight)] {
+        h.input_mut().system_theme = Some(system);
+        h.run_steps(2);
+        assert_eq!(h.state().theme_kind(), kind, "System with the system {system:?}");
+        assert_eq!(drawn_dark(&h), kind == ThemeKind::Studio, "drawn to match the system {system:?}");
+    }
+    // A chosen theme overrides the system's appearance as it changes.
+    for (chosen, kind) in [("studio", ThemeKind::Studio), ("studio-light", ThemeKind::StudioLight)] {
+        h.state_mut().settings.theme = chosen.into();
+        for system in [Light, Dark, Light] {
+            h.input_mut().system_theme = Some(system);
+            h.run_steps(2);
+            assert_eq!(h.state().theme_kind(), kind, "{chosen} with the system {system:?}");
+            assert_eq!(drawn_dark(&h), kind == ThemeKind::Studio, "{chosen} drawn with the system {system:?}");
+        }
+    }
+}
+
 #[test]
 fn settings_window_tabs_draw() {
     let mut h = harness(|| {
@@ -1861,9 +2113,17 @@ fn settings_window_tabs_draw() {
         h.run_steps(2);
         assert_eq!(edge(&h), right, "the Settings window changed width on {tab}");
     }
+    // System is the default; picking a theme keeps it, and System can be picked again.
+    assert_eq!(h.state().settings.theme, "system");
     h.get_by_label("Studio Light").click();
     h.run_steps(3);
     assert_eq!(h.state().settings.theme, "studio-light");
+    assert_eq!(h.state().theme_kind(), craft_anything_ui_egui::theme::ThemeKind::StudioLight);
+    // Language says "System" too when none is chosen: take the one on Studio's line.
+    let line = h.get_by_label("Studio").rect().center().y;
+    h.query_all_by_label("System").find(|n| (n.rect().center().y - line).abs() < 4.0).expect("System beside Studio").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings.theme, "system");
 
     // At the same window size, the same tab keeps its content bounds with and without scrolling.
     let content_bounds = |overflow: bool| {
@@ -1924,6 +2184,42 @@ fn settings_controls_change_builds_art_and_studying() {
     h.get_by_label("Run to study").click();
     h.run_steps(2);
     assert!(h.state().settings.runtime_study);
+}
+
+/// #2153: arguments in square brackets that aren't a list of quoted words are refused with a
+/// sentence saying what's taken, and Add does nothing until they're fixed.
+#[test]
+fn a_plugins_bad_argument_list_is_refused_until_fixed() {
+    use egui_kittest::kittest::NodeT;
+    const PROBLEM: &str =
+        r#"Arguments in square brackets must be a list of quoted words, like ["--port", "8080"]. Or leave out the brackets and separate them with spaces."#;
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.state.settings_open = true;
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("Plugins").click();
+    h.run_steps(3);
+    for (field, text) in [("Plugin id", "ls"), ("Plugin command or address", "server"), ("Plugin arguments", r#"["--stdio", "--port",]"#)] {
+        h.get_by_label(field).focus();
+        h.run_steps(1);
+        h.get_by_label(field).type_text(text);
+        h.run_steps(2);
+    }
+    assert_eq!(h.state().state.plugin_form.args, r#"["--stdio", "--port",]"#);
+    h.get_by_label(PROBLEM);
+    assert!(h.get_by_label("Add").accesskit_node().is_disabled(), "Add is off while the list is bad");
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    assert_eq!(h.state().state.plugin_form.id, "ls", "a click on Add leaves the form as it is");
+    assert_eq!(h.state().state.plugin_form.params(), None);
+    // Fixed (the trailing comma gone), the message goes and the plugin's arguments are the list.
+    h.state_mut().state.plugin_form.args = r#"["--stdio", "--port"]"#.into();
+    h.run_steps(3);
+    assert!(h.query_by_label(PROBLEM).is_none(), "the message goes once the list is fixed");
+    assert!(!h.get_by_label("Add").accesskit_node().is_disabled(), "Add is on once the list is fixed");
+    assert_eq!(h.state().state.plugin_form.params(), Some(serde_json::json!({"id": "ls", "command": "server", "args": ["--stdio", "--port"]})));
 }
 
 #[test]
@@ -3530,4 +3826,96 @@ fn a_very_long_app_file_name_keeps_start_inside_the_window() {
     let content = h.ctx.content_rect();
     let start = h.get_by_label("Start").rect();
     assert!(start.left() >= 0.0 && start.right() <= content.right(), "Start ({start:?}) stays inside the window ({content:?})");
+}
+
+/// #1300: the app's version can be seen on every system, under Settings → About at the bottom of
+/// the tab list (only macOS has an About in its menu bar).
+#[test]
+fn settings_about_shows_the_apps_version() {
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.state.settings_open = true;
+        a
+    });
+    h.run_steps(3);
+    let safety = h.get_by_label("Safety").rect();
+    let about = h.get_by_label("About").rect();
+    assert!(about.top() > safety.bottom() + 40.0, "About sits apart at the bottom of the list");
+    h.get_by_label("About").click();
+    h.run_steps(3);
+    let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+    h.get_by_label(&version);
+    // A button copies it, so a keyboard can too (selectable labels aren't in egui's Tab order).
+    h.get_by_label("Copy the version").click();
+    h.step();
+    let copied = h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if *t == version));
+    assert!(copied, "the button copies the version");
+
+    // The keyboard path: Tab from the About tab reaches the button, and Enter or Space copies.
+    // `key_press` queues the key's press and release, and `step` runs a frame for each, so the
+    // press is sent alone to read the frame it lands in.
+    h.get_by_label("About").focus();
+    h.run_steps(2);
+    h.key_press(egui::Key::Tab);
+    h.run_steps(2);
+    assert!(h.get_by_label("Copy the version").is_focused(), "Tab reaches the copy button");
+    for key in [egui::Key::Enter, egui::Key::Space] {
+        let event = |pressed| egui::Event::Key { key, pressed, modifiers: egui::Modifiers::NONE, repeat: false, physical_key: None };
+        h.event(event(true));
+        h.step();
+        let copied = h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if *t == version));
+        assert!(copied, "{key:?} on the button copies the version");
+        h.event(event(false));
+        h.step();
+    }
+}
+
+/// A workspace member's build lands in the workspace's `target/`, outside the app: the Project
+/// screen finds it by reading the files (no process is started for it), so Play and "Pin this
+/// build" show. Another project's program of the same name there doesn't count.
+#[test]
+fn a_workspace_members_build_shows_play_on_the_project_screen() {
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(&d.path().join("projects"), "Snake", "A snake game in Rust", TargetRef::None).unwrap();
+    std::fs::write(ws.root.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n").unwrap();
+    let app = ws.app_dir();
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"snake\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let exe = if cfg!(windows) { "snake.exe" } else { "snake" };
+    let program = ws.root.join("target/debug").join(exe);
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::write(&program, "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let record = |source: &std::path::Path| {
+        let source = std::path::absolute(source).unwrap();
+        std::fs::write(program.with_extension("d"), format!("{}: {}\n", program.display(), source.display())).unwrap();
+    };
+    let other = d.path().join("other/src/main.rs");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "fn main() {}\n").unwrap();
+    record(&other);
+    let (decoy_ws, root) = (ws.clone(), ws.root.clone());
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.open_workspace(decoy_ws);
+        a
+    });
+    assert!(wait(&mut h, |a| a.facts.root == root), "the project is read");
+    assert!(!h.state().facts.program, "another project's program of that name isn't this one's");
+
+    record(&app.join("src/main.rs"));
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.open_workspace(ws);
+        a
+    });
+    assert!(wait(&mut h, |a| a.facts.program), "the member's build is found");
+    h.run_steps(2);
+    h.get_by_label("Pin this build");
 }

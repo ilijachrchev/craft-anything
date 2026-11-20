@@ -124,9 +124,13 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     crate::bytes::decode_base64(text, false)
 }
 
+/// Maximum absolute Apple-epoch seconds (`1e13`, ~317,000 years from 2001) formatted as ISO-8601.
+/// Fits losslessly inside `f64`'s 53-bit integer significand; larger magnitudes stay raw numbers.
+const MAX_APPLE_DATE_SECS: i128 = 10_000_000_000_000;
+
 /// An Apple absolute time (seconds since 2001-01-01Z) as ISO-8601 UTC, rounded to microseconds.
 pub fn apple_date_iso(secs: f64) -> String {
-    if !secs.is_finite() || secs.abs() > 1e13 {
+    if !secs.is_finite() || secs.abs() > MAX_APPLE_DATE_SECS as f64 {
         return format!("{secs}");
     }
     // Separate the fraction before adding the epoch offset, which would otherwise lose
@@ -155,6 +159,12 @@ pub fn apple_date_iso(secs: f64) -> String {
     let y = if m <= 2 { y + 1 } else { y };
     let fraction = if micros == 0 { String::new() } else { format!(".{micros:06}").trim_end_matches('0').to_string() };
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}{fraction}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Format an integer Apple absolute time using [`apple_date_iso`] within [`MAX_APPLE_DATE_SECS`],
+/// falling back to the exact decimal string when outside that range.
+pub(crate) fn apple_date_int_iso(secs: i128) -> String {
+    if secs.unsigned_abs() <= MAX_APPLE_DATE_SECS as u128 { apple_date_iso(secs as f64) } else { secs.to_string() }
 }
 
 /// True when the bytes look like a property list of either kind.

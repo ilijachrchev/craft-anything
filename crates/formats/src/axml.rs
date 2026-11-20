@@ -578,11 +578,16 @@ fn sval(attrs: &[Attribute], name: &str) -> Option<String> {
     attr(attrs, name).map(|a| a.value.clone())
 }
 
+/// Read a boolean attribute, accepting both `TYPE_INT_BOOLEAN` (`0x12`) and integer-typed
+/// `Res_value` encodings (`0x10..=0x1f`, non-zero = `true`) as Android's `ResTable` does.
 fn bval(attrs: &[Attribute], name: &str) -> Option<bool> {
-    attr(attrs, name).and_then(|a| match a.value.as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
+    attr(attrs, name).and_then(|a| match a.raw.data_type {
+        0x10..=0x1f => Some(a.raw.data != 0),
+        _ => match a.value.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
     })
 }
 
@@ -607,7 +612,7 @@ pub fn manifest(doc: &Document) -> Manifest {
                 let parent = stack.last().map(String::as_str).unwrap_or("");
                 match (parent, name.as_str()) {
                     (_, "manifest") => {
-                        m.package = a.iter().find(|x| x.name == "package").map(|x| x.value.clone());
+                        m.package = a.iter().find(|x| x.name == "package" && x.namespace.is_none()).map(|x| x.value.clone());
                         m.version_code = sval(a, "versionCode");
                         m.version_name = sval(a, "versionName");
                     }
