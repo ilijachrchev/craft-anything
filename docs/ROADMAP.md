@@ -487,6 +487,10 @@ Every round spends the person's money or quota. One that can't do anything shoul
       started in the person's own folder is told to leave Craft Anything's records alone: tell every
       builder, and say in the error that something else wrote the file and how to go on
       — claimed: youkaicountry, branch bugfix/r5.3-builder-wrote-progress-record
+- [ ] A builder turn that did nothing uses up the request without a word (#2431: a Claude Code
+      turn ended at once with "0 tokens in, 0 out" after a new request and after a resume
+      following Pause). Find the cause; send such a turn once more and say so if it stays empty
+      — claimed: ilijachrchev, branch bugfix/2431-empty-builder-turn
 
 ### R5.4 Local models can build
 Owner: open · Status: todo
